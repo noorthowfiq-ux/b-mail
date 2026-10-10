@@ -2,9 +2,16 @@
 import { useEffect, useState } from "react";
 import "./App.css";
 
-const API_URL = "http://localhost:5000";
+// Use the deployed backend URL in production.
+// For local development, the fallback remains localhost.
+const API_URL = (
+  import.meta.env.VITE_API_URL ||
+  "http://localhost:5000"
+).replace(/\/+$/, "");
+
 const TOKEN_KEY = "bulkmail_admin_token";
 
+// Authenticated API requests
 async function authFetch(url, options = {}) {
   const token = localStorage.getItem(TOKEN_KEY);
 
@@ -47,7 +54,9 @@ function LoginPage({ onLogin }) {
       localStorage.setItem(TOKEN_KEY, data.token);
       onLogin();
     } catch (err) {
-      setError(err.message || "Unable to connect to the backend.");
+      setError(
+        err.message || "Unable to connect to the backend."
+      );
     } finally {
       setLoading(false);
     }
@@ -149,7 +158,8 @@ function Dashboard({ onLogout }) {
       console.error("Campaign history error:", error);
       setStatus({
         type: "error",
-        text: "Could not load campaign history. Check your backend connection.",
+        text:
+          "Could not load campaign history. Check your backend connection.",
       });
     } finally {
       setLoadingHistory(false);
@@ -158,7 +168,7 @@ function Dashboard({ onLogout }) {
 
   useEffect(() => {
     loadCampaigns();
-    // Initial history load only.
+    // Load campaign history when the dashboard first opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -193,7 +203,6 @@ function Dashboard({ onLogout }) {
     setSending(true);
 
     try {
-      // IMPORTANT: Send email requests to /sendemail, not /campaigns.
       const response = await authFetch(`${API_URL}/sendemail`, {
         method: "POST",
         headers: {
@@ -260,7 +269,7 @@ function Dashboard({ onLogout }) {
 
         <div className="sidebar-bottom">
           <span className="connection-dot" />
-          Local workspace
+          Online workspace
           <p>BulkMail · Email management</p>
         </div>
       </aside>
@@ -308,7 +317,9 @@ function Dashboard({ onLogout }) {
                 0
               )}
             </strong>
-            <span className="stat-note">Successful sends in history</span>
+            <span className="stat-note">
+              Successful sends in history
+            </span>
           </div>
 
           <div className="stat-card">
@@ -319,7 +330,9 @@ function Dashboard({ onLogout }) {
                 0
               )}
             </strong>
-            <span className="stat-note">Recorded sending failures</span>
+            <span className="stat-note">
+              Recorded sending failures
+            </span>
           </div>
         </section>
 
@@ -409,15 +422,16 @@ function Dashboard({ onLogout }) {
               <span className="guide-number">03</span>
               <div>
                 <strong>Check your connection</strong>
-                <p>Keep the backend running during sending.</p>
+                <p>Keep the backend available during sending.</p>
               </div>
             </div>
 
             <div className="notice">
               <strong>Sending limit</strong>
               <p>
-                This project supports up to 20 unique recipients per campaign.
-                Send only to people who have agreed to receive your emails.
+                This project supports up to 20 unique recipients per
+                campaign. Send only to people who have agreed to receive
+                your emails.
               </p>
             </div>
           </div>
@@ -467,7 +481,9 @@ function Dashboard({ onLogout }) {
                     <tr key={campaign._id}>
                       <td className="message-cell">
                         {(campaign.message || "").slice(0, 55)}
-                        {(campaign.message || "").length > 55 ? "..." : ""}
+                        {(campaign.message || "").length > 55
+                          ? "..."
+                          : ""}
                       </td>
 
                       <td>{campaign.recipients?.length || 0}</td>
