@@ -1,22 +1,22 @@
+
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
-const nodemailer = require("nodemailer");
 const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
+const { google } = require("googleapis");
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// CORS: local development and configured frontend domains.
 const allowedOrigins = [
   "http://localhost:5173",
   process.env.FRONTEND_URL
 ]
   .filter(Boolean)
-  .map(origin => origin.replace(/\/+$/, ""));
+  .map((origin) => origin.replace(/\/+$/, ""));
 
 app.use(
   cors({
@@ -31,12 +31,11 @@ app.use(
   })
 );
 
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
-// Require a valid administrator token for protected routes.
+// Admin authentication
 function requireAdmin(req, res, next) {
   const header = req.headers.authorization;
-
   const token = header?.startsWith("Bearer ")
     ? header.slice(7)
     : null;
@@ -68,7 +67,31 @@ function requireAdmin(req, res, next) {
   }
 }
 
-// Admin login.
+// Gmail API client. Google refreshes access tokens automatically.
+const oauthConfigured = Boolean(
+  process.env.GOOGLE_CLIENT_ID &&
+  process.env.GOOGLE_CLIENT_SECRET &&
+  process.env.GMAIL_REFRESH_TOKEN &&
+  process.env.SMTP_USER
+);
+
+const oauth2Client = new google.auth.OAuth2(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET
+);
+
+if (oauthConfigured) {
+  oauth2Client.setCredentials({
+    refresh_token: process.env.GMAIL_REFRESH_TOKEN
+  });
+}
+
+const gmail = google.gmail({
+  version: "v1",
+  auth: oauth2Client
+});
+
+// Admin login
 app.post("/login", (req, res) => {
   const { username, password } = req.body || {};
 
@@ -104,30 +127,18 @@ app.post("/login", (req, res) => {
   return res.json({ success: true, token, username });
 });
 
-// Campaign database model.
+// Campaign history model
 const campaignSchema = new mongoose.Schema({
-  message: {
-    type: String,
-    required: true
-  },
+  message: { type: String, required: true },
   recipients: [String],
-  sentCount: {
-    type: Number,
-    default: 0
-  },
-  failedCount: {
-    type: Number,
-    default: 0
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now
-  }
+  sentCount: { type: Number, default: 0 },
+  failedCount: { type: Number, default: 0 },
+  createdAt: { type: Date, default: Date.now }
 });
 
 const Campaign = mongoose.model("Campaign", campaignSchema);
 
-// Public health-check routes.
+// Health checks
 app.get("/", (req, res) => {
   res.json({
     success: true,
@@ -142,7 +153,7 @@ app.get("/test", (req, res) => {
   });
 });
 
-// Protected campaign history.
+// Protected campaign history
 app.get("/campaigns", requireAdmin, async (req, res) => {
   try {
     const campaigns = await Campaign.find()
@@ -160,7 +171,25 @@ app.get("/campaigns", requireAdmin, async (req, res) => {
   }
 });
 
-// Protected email sending.
+// Build a plain-text RFC 2822 message and encode it for Gmail API.
+function createRawMessage(from, to, text) {
+  const safeText = text.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n");
+
+  const message = [
+    `From: ${from}`,
+    `To: ${to}`,
+    "Subject: Message from BulkMail",
+    "MIME-Version: 1.0",
+    'Content-Type: text/plain; charset="UTF-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    Buffer.from(safeText, "utf8").toString("base64")
+  ].join("\r\n");
+
+  return Buffer.from(message, "utf8").toString("base64url");
+}
+
+// Protected email sending using Gmail API over HTTPS
 app.post("/sendemail", requireAdmin, async (req, res) => {
   try {
     const { message, recipients } = req.body || {};
@@ -184,13 +213,12 @@ app.post("/sendemail", requireAdmin, async (req, res) => {
       });
     }
 
-    // Validate, trim, and remove duplicate addresses.
     const validRecipients = [
       ...new Set(
         recipients
-          .filter(email => typeof email === "string")
-          .map(email => email.trim())
-          .filter(email =>
+          .filter((email) => typeof email === "string")
+          .map((email) => email.trim())
+          .filter((email) =>
             /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
           )
       )
@@ -203,46 +231,34 @@ app.post("/sendemail", requireAdmin, async (req, res) => {
       });
     }
 
-    if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    if (!oauthConfigured) {
       return res.status(500).json({
         success: false,
-        message: "Email sending is not configured."
+        message: "Gmail API credentials are not configured."
       });
     }
-
-    // Gmail SMTP using port 587 and STARTTLS.
-    const transporter = nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 587,
-      secure: false,
-      requireTLS: true,
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
-      },
-      connectionTimeout: 20000,
-      greetingTimeout: 20000,
-      socketTimeout: 30000
-    });
 
     let sentCount = 0;
     const failed = [];
 
-    // Send only to recipients who have consented to receive the email.
     for (const recipient of validRecipients) {
       try {
-        await transporter.sendMail({
-          from: process.env.SMTP_USER,
-          to: recipient,
-          subject: "Message from BulkMail",
-          text: message.trim()
+        const raw = createRawMessage(
+          process.env.SMTP_USER,
+          recipient,
+          message.trim()
+        );
+
+        await gmail.users.messages.send({
+          userId: "me",
+          requestBody: { raw }
         });
 
         sentCount++;
       } catch (error) {
         console.error(
-          "Email sending failed:",
-          error.code || "UNKNOWN",
+          "Gmail API send failed:",
+          error.code || error.response?.status || "UNKNOWN",
           error.message
         );
 
@@ -250,7 +266,6 @@ app.post("/sendemail", requireAdmin, async (req, res) => {
       }
     }
 
-    // Save campaign history when MongoDB is connected.
     if (mongoose.connection.readyState === 1) {
       await Campaign.create({
         message: message.trim(),
@@ -276,28 +291,24 @@ app.post("/sendemail", requireAdmin, async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: "Email sending failed. Check the backend logs."
+      message: "Email sending failed. Check backend logs."
     });
   }
 });
 
-// Connect to MongoDB if configured.
+// MongoDB connection
 if (process.env.MONGODB_URI) {
   mongoose
     .connect(process.env.MONGODB_URI)
-    .then(() => {
-      console.log("MongoDB connected.");
-    })
-    .catch(error => {
+    .then(() => console.log("MongoDB connected."))
+    .catch((error) => {
       console.error("MongoDB connection failed:", error.message);
     });
 } else {
-  console.log(
-    "MONGODB_URI missing; campaign history needs MongoDB."
-  );
+  console.log("MONGODB_URI missing; campaign history needs MongoDB.");
 }
 
-// Start the server using Render's assigned port.
+// Start server
 app.listen(PORT, () => {
   console.log(`BulkMail backend running on port ${PORT}`);
 });
