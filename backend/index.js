@@ -1,4 +1,3 @@
-
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
@@ -11,20 +10,22 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// CORS configuration: local development + deployed frontend
+// CORS: local development and configured frontend domains.
 const allowedOrigins = [
   "http://localhost:5173",
   process.env.FRONTEND_URL
-].filter(Boolean);
+]
+  .filter(Boolean)
+  .map(origin => origin.replace(/\/+$/, ""));
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests without an Origin header, such as health checks.
       if (!origin || allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
 
+      console.warn("CORS rejected origin:", origin);
       return callback(new Error("Origin not allowed by CORS."));
     }
   })
@@ -42,6 +43,7 @@ function requireAdmin(req, res, next) {
 
   if (!token || !process.env.JWT_SECRET) {
     return res.status(401).json({
+      success: false,
       message: "Admin login required."
     });
   }
@@ -51,19 +53,22 @@ function requireAdmin(req, res, next) {
 
     if (decoded.role !== "admin") {
       return res.status(403).json({
+        success: false,
         message: "Admin access required."
       });
     }
 
+    req.admin = decoded;
     next();
   } catch {
     return res.status(401).json({
+      success: false,
       message: "Session expired. Please log in again."
     });
   }
 }
 
-// Admin login
+// Admin login.
 app.post("/login", (req, res) => {
   const { username, password } = req.body || {};
 
@@ -73,6 +78,7 @@ app.post("/login", (req, res) => {
     !process.env.JWT_SECRET
   ) {
     return res.status(500).json({
+      success: false,
       message: "Admin authentication is not configured."
     });
   }
@@ -84,6 +90,7 @@ app.post("/login", (req, res) => {
     password !== process.env.ADMIN_PASSWORD
   ) {
     return res.status(401).json({
+      success: false,
       message: "Incorrect username or password."
     });
   }
@@ -94,10 +101,10 @@ app.post("/login", (req, res) => {
     { expiresIn: "8h" }
   );
 
-  return res.json({ token, username });
+  return res.json({ success: true, token, username });
 });
 
-// Campaign database model
+// Campaign database model.
 const campaignSchema = new mongoose.Schema({
   message: {
     type: String,
@@ -120,7 +127,7 @@ const campaignSchema = new mongoose.Schema({
 
 const Campaign = mongoose.model("Campaign", campaignSchema);
 
-// Public health-check routes
+// Public health-check routes.
 app.get("/", (req, res) => {
   res.json({
     success: true,
@@ -135,7 +142,7 @@ app.get("/test", (req, res) => {
   });
 });
 
-// Protected campaign history
+// Protected campaign history.
 app.get("/campaigns", requireAdmin, async (req, res) => {
   try {
     const campaigns = await Campaign.find()
@@ -147,12 +154,13 @@ app.get("/campaigns", requireAdmin, async (req, res) => {
     console.error("History error:", error.message);
 
     return res.status(500).json({
+      success: false,
       message: "Could not load campaign history."
     });
   }
 });
 
-// Protected email sending
+// Protected email sending.
 app.post("/sendemail", requireAdmin, async (req, res) => {
   try {
     const { message, recipients } = req.body || {};
@@ -164,12 +172,14 @@ app.post("/sendemail", requireAdmin, async (req, res) => {
       recipients.length === 0
     ) {
       return res.status(400).json({
+        success: false,
         message: "Enter a message and at least one recipient."
       });
     }
 
     if (recipients.length > 20) {
       return res.status(400).json({
+        success: false,
         message: "Maximum 20 recipients per request."
       });
     }
@@ -188,29 +198,37 @@ app.post("/sendemail", requireAdmin, async (req, res) => {
 
     if (validRecipients.length === 0) {
       return res.status(400).json({
+        success: false,
         message: "No valid email addresses were found."
       });
     }
 
     if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
       return res.status(500).json({
+        success: false,
         message: "Email sending is not configured."
       });
     }
 
+    // Gmail SMTP using port 587 and STARTTLS.
     const transporter = nodemailer.createTransport({
-      service: "gmail",
+      host: "smtp.gmail.com",
+      port: 587,
+      secure: false,
+      requireTLS: true,
       auth: {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASS
-      }
+      },
+      connectionTimeout: 20000,
+      greetingTimeout: 20000,
+      socketTimeout: 30000
     });
 
     let sentCount = 0;
     const failed = [];
 
-    // Send only to intended recipients who have consented to receive
-    // the message.
+    // Send only to recipients who have consented to receive the email.
     for (const recipient of validRecipients) {
       try {
         await transporter.sendMail({
@@ -222,12 +240,17 @@ app.post("/sendemail", requireAdmin, async (req, res) => {
 
         sentCount++;
       } catch (error) {
-        console.error("Email sending failed:", error.message);
+        console.error(
+          "Email sending failed:",
+          error.code || "UNKNOWN",
+          error.message
+        );
+
         failed.push(recipient);
       }
     }
 
-    // Save campaign history if MongoDB is connected.
+    // Save campaign history when MongoDB is connected.
     if (mongoose.connection.readyState === 1) {
       await Campaign.create({
         message: message.trim(),
@@ -237,9 +260,13 @@ app.post("/sendemail", requireAdmin, async (req, res) => {
       });
     }
 
-    return res.json({
-      success: true,
-      message: "Email sending process completed.",
+    const allSent = failed.length === 0;
+
+    return res.status(allSent ? 200 : 502).json({
+      success: allSent,
+      message: allSent
+        ? "All emails were sent successfully."
+        : "Email sending completed with failures. Check backend logs.",
       sentCount,
       failedCount: failed.length,
       failed
@@ -248,6 +275,7 @@ app.post("/sendemail", requireAdmin, async (req, res) => {
     console.error("Send email error:", error.message);
 
     return res.status(500).json({
+      success: false,
       message: "Email sending failed. Check the backend logs."
     });
   }
@@ -269,7 +297,7 @@ if (process.env.MONGODB_URI) {
   );
 }
 
-// Start the server using Render's assigned port when deployed.
+// Start the server using Render's assigned port.
 app.listen(PORT, () => {
   console.log(`BulkMail backend running on port ${PORT}`);
 });
