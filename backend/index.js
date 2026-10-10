@@ -11,12 +11,31 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors({ origin: "http://localhost:5173" }));
+// CORS configuration: local development + deployed frontend
+const allowedOrigins = [
+  "http://localhost:5173",
+  process.env.FRONTEND_URL
+].filter(Boolean);
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow requests without an Origin header, such as health checks.
+      if (!origin || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("Origin not allowed by CORS."));
+    }
+  })
+);
+
 app.use(express.json());
 
 // Require a valid administrator token for protected routes.
 function requireAdmin(req, res, next) {
   const header = req.headers.authorization;
+
   const token = header?.startsWith("Bearer ")
     ? header.slice(7)
     : null;
@@ -54,7 +73,7 @@ app.post("/login", (req, res) => {
     !process.env.JWT_SECRET
   ) {
     return res.status(500).json({
-      message: "Admin authentication is not configured in .env."
+      message: "Admin authentication is not configured."
     });
   }
 
@@ -75,16 +94,28 @@ app.post("/login", (req, res) => {
     { expiresIn: "8h" }
   );
 
-  res.json({ token, username });
+  return res.json({ token, username });
 });
 
 // Campaign database model
 const campaignSchema = new mongoose.Schema({
-  message: { type: String, required: true },
+  message: {
+    type: String,
+    required: true
+  },
   recipients: [String],
-  sentCount: { type: Number, default: 0 },
-  failedCount: { type: Number, default: 0 },
-  createdAt: { type: Date, default: Date.now }
+  sentCount: {
+    type: Number,
+    default: 0
+  },
+  failedCount: {
+    type: Number,
+    default: 0
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  }
 });
 
 const Campaign = mongoose.model("Campaign", campaignSchema);
@@ -111,10 +142,11 @@ app.get("/campaigns", requireAdmin, async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(50);
 
-    res.json(campaigns);
+    return res.json(campaigns);
   } catch (error) {
     console.error("History error:", error.message);
-    res.status(500).json({
+
+    return res.status(500).json({
       message: "Could not load campaign history."
     });
   }
@@ -142,12 +174,15 @@ app.post("/sendemail", requireAdmin, async (req, res) => {
       });
     }
 
+    // Validate, trim, and remove duplicate addresses.
     const validRecipients = [
       ...new Set(
         recipients
           .filter(email => typeof email === "string")
           .map(email => email.trim())
-          .filter(email => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+          .filter(email =>
+            /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+          )
       )
     ];
 
@@ -159,7 +194,7 @@ app.post("/sendemail", requireAdmin, async (req, res) => {
 
     if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
       return res.status(500).json({
-        message: "Configure SMTP_USER and SMTP_PASS in backend/.env."
+        message: "Email sending is not configured."
       });
     }
 
@@ -174,6 +209,8 @@ app.post("/sendemail", requireAdmin, async (req, res) => {
     let sentCount = 0;
     const failed = [];
 
+    // Send only to intended recipients who have consented to receive
+    // the message.
     for (const recipient of validRecipients) {
       try {
         await transporter.sendMail({
@@ -190,6 +227,7 @@ app.post("/sendemail", requireAdmin, async (req, res) => {
       }
     }
 
+    // Save campaign history if MongoDB is connected.
     if (mongoose.connection.readyState === 1) {
       await Campaign.create({
         message: message.trim(),
@@ -199,7 +237,7 @@ app.post("/sendemail", requireAdmin, async (req, res) => {
       });
     }
 
-    res.json({
+    return res.json({
       success: true,
       message: "Email sending process completed.",
       sentCount,
@@ -208,23 +246,30 @@ app.post("/sendemail", requireAdmin, async (req, res) => {
     });
   } catch (error) {
     console.error("Send email error:", error.message);
-    res.status(500).json({
-      message: "Email sending failed. Check the backend terminal."
+
+    return res.status(500).json({
+      message: "Email sending failed. Check the backend logs."
     });
   }
 });
 
-// Connect to MongoDB if configured
+// Connect to MongoDB if configured.
 if (process.env.MONGODB_URI) {
-  mongoose.connect(process.env.MONGODB_URI)
-    .then(() => console.log("MongoDB connected."))
-    .catch(error =>
-      console.error("MongoDB connection failed:", error.message)
-    );
+  mongoose
+    .connect(process.env.MONGODB_URI)
+    .then(() => {
+      console.log("MongoDB connected.");
+    })
+    .catch(error => {
+      console.error("MongoDB connection failed:", error.message);
+    });
 } else {
-  console.log("MONGODB_URI missing; campaign history needs MongoDB.");
+  console.log(
+    "MONGODB_URI missing; campaign history needs MongoDB."
+  );
 }
 
+// Start the server using Render's assigned port when deployed.
 app.listen(PORT, () => {
-  console.log(`BulkMail backend running at http://localhost:${PORT}`);
+  console.log(`BulkMail backend running on port ${PORT}`);
 });
